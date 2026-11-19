@@ -6,6 +6,14 @@ import pandas as pd
 MEASUREMENT_STATUSES = ['PREREACTION-BASELINE', 'REACTION', 'POSTREACTION-BASELINE']
 MEASUREMENT_COMMANDS = ['LAMP-ON', 'FIRESTING-START', 'LAMP-OFF']
 
+# Dark measurements the intensity calibration is fitted on (O2 falls from air saturation during degassing)
+CALIBRATION_STATUSES = ['DEGASSING', 'PREREACTION-BASELINE']
+CALIBRATION_COMMAND = 'FIRESTING-START'
+
+OXYGEN_COLUMN = 'uM_1'
+INTENSITY_COLUMN = 'signal_intensity_1'
+TEMPERATURE_COLUMN = 'optical_temperature_2'
+
 def find_phase_start(time, status, phase, file_path):
     """
     Find the time of the first row of a robot program phase.
@@ -39,17 +47,20 @@ def read_robot_log_file(file_path):
     Read O2 data from a photocat-hte robot log file.
 
     Time is re-zeroed at the start of degassing, and only the pre-reaction
-    baseline, reaction and post-reaction baseline measurements are kept.
+    baseline, reaction and post-reaction baseline measurements are kept, plus
+    the degassing and pre-reaction measurements for the intensity calibration.
 
     Parameters
     ----------
     file_path : Path
-        Robot log CSV with the columns 'duration', 'status', 'command' and 'uM_1'.
+        Robot log CSV with the columns 'duration', 'status', 'command', 'uM_1',
+        'signal_intensity_1' and 'optical_temperature_2'.
 
     Returns
     -------
     raw_data_dict : dict
-        Time and O2 data (umol/L) plus start and end of the irradiation.
+        Time, O2 (umol/L) and luminescence intensity, start and end of the
+        irradiation, and the calibration measurements.
     """
 
     log = pd.read_csv(file_path, low_memory = False)
@@ -58,6 +69,8 @@ def read_robot_log_file(file_path):
 
     measurements = log[log['status'].isin(MEASUREMENT_STATUSES)
                        & log['command'].isin(MEASUREMENT_COMMANDS)]
+    calibration = log[log['status'].isin(CALIBRATION_STATUSES)
+                      & (log['command'] == CALIBRATION_COMMAND)]
 
     time_s = measurements['duration'].to_numpy(float) - degassing_start
     status = measurements['status'].to_numpy()
@@ -68,11 +81,15 @@ def read_robot_log_file(file_path):
     raw_data_dict = {
         'time_s': time_s,
         'time_unit': 's',
-        'measurement_raw': measurements['uM_1'].to_numpy(float),
+        'measurement_raw': measurements[OXYGEN_COLUMN].to_numpy(float),
         'measurement_unit': 'umol/L',
+        'signal_intensity': measurements[INTENSITY_COLUMN].to_numpy(float),
         # First sample of the reaction phase and first sample after it
         'irradiation_start_s': find_phase_start(time_s, status, 'REACTION', file_path),
         'irradiation_end_s': find_phase_start(time_s, status, 'POSTREACTION-BASELINE', file_path),
+        'calibration_oxygen_umol_L': calibration[OXYGEN_COLUMN].to_numpy(float),
+        'calibration_intensity': calibration[INTENSITY_COLUMN].to_numpy(float),
+        'calibration_temperature_C': calibration[TEMPERATURE_COLUMN].to_numpy(float),
     }
 
     return raw_data_dict

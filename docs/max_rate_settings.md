@@ -10,6 +10,8 @@ Both come from pyKES `extract_max_rate`. Its result is used in two passes, set u
 - **Short O2 bursts** (e.g. the BC series): O2 rises within 10–40 s and then decays.
 - **Pulsed irradiation** (e.g. BA-10 to BA-13): the trace rises over minutes but scatters strongly. The scatter grows with the O2 level, by 7–19 % of the level in these runs.
 
+The scatter of pulsed runs comes from the sensor's phase reading. During irradiation, O2 is now taken from the sensor's intensity instead ([pulsed_irradiation.md](pulsed_irradiation.md)), which leaves 2–8 % scatter. The benchmark below was run with the phase-reading scatter and still describes how the method copes with what remains.
+
 The code is in [`general_processing_functions.py`](../src/pykes_robot_app/data_parsing/general_processing_functions.py) (`processing_data`, `build_max_rate_options`, `find_rising_part`, `find_early_max_rate`).
 
 ## Why the pyKES defaults are not used
@@ -76,7 +78,9 @@ The smoothing-free cross-check of pyKES needs at least 10 samples per window. Wi
 
 ## Outputs
 
-| Key in `processed_data` | Meaning |
+The keys exist twice, under `processed_data/intensity/` and `processed_data/phase/`, one set per O2 signal ([pulsed_irradiation.md](pulsed_irradiation.md)).
+
+| Key | Meaning |
 |---|---|
 | `max_rate_umol_s`, `max_rate_time_s`, `max_rate_window_s` | Max rate, centre and length of its window |
 | `max_rate_flags` | Quality flags (see above) |

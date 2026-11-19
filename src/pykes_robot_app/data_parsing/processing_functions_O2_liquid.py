@@ -1,9 +1,12 @@
 from pathlib import Path
 
+import numpy as np
+
 from pyKES.utilities.unit_handler import Quantity
 
 from pykes_robot_app.data_parsing.raw_data_reading_functions import read_robot_log_file
 from pykes_robot_app.data_parsing.baseline_correction import correct_baseline
+from pykes_robot_app.data_parsing.oxygen_from_intensity import calculate_oxygen_from_intensity
 from pykes_robot_app.data_parsing.general_processing_functions import (
     processing_data,
     convert_umol_L_to_mol,
@@ -32,7 +35,9 @@ def raw_data_reading_function_O2_liquid(directory: Path, metadata_dict):
 
 def processing_function_O2_liquid(raw_data_dict, metadata_dict):
     """
-    Process liquid phase O2 data given in umol/L: baseline correction, then max rate and max O2.
+    Process liquid phase O2 data given in umol/L: baseline correction, then max
+    rate and max O2, once with O2 from the sensor's phase reading and once with
+    O2 from its luminescence intensity during irradiation.
 
     Parameters
     ----------
@@ -44,45 +49,60 @@ def processing_function_O2_liquid(raw_data_dict, metadata_dict):
     Returns
     -------
     processed_O2 : dict
-        Processed data, max rate and max O2 amount, plus the baseline correction.
+        Baseline correction and intensity calibration, plus the processed data,
+        max rate and max O2 of each O2 signal under 'intensity' and 'phase'.
     """
 
-    baseline, baseline_with_step, data_corrected = correct_baseline(
-        raw_data_dict['time_s'],
-        raw_data_dict['measurement_raw'],
-        raw_data_dict['irradiation_start_s'],
-        raw_data_dict['irradiation_end_s'],
-        PROCESSING_PARAMETERS['processing_parameters']['baseline_polynomial_order'])
+    time = raw_data_dict['time_s']
+    start = raw_data_dict['irradiation_start_s']
+    end = raw_data_dict['irradiation_end_s']
+    parameters = PROCESSING_PARAMETERS['processing_parameters']
 
-    data_quantity = convert_umol_L_to_mol(data_corrected,
-                                          liquid_phase_volume_ml = PROCESSING_PARAMETERS['processing_parameters']['liquid_phase_volume_ml'])
+    oxygen_from_intensity, intensity_parameters, intensity_drift = calculate_oxygen_from_intensity(raw_data_dict)
+    irradiated = (time >= start) & (time < end)
+    oxygen_signals = {'intensity': np.where(irradiated, oxygen_from_intensity, raw_data_dict['measurement_raw']),
+                      'phase': raw_data_dict['measurement_raw']}
 
-    processed_O2 = processing_data(
-        time = Quantity(raw_data_dict['time_s'], 's'),
-        data = data_quantity,
-        start = Quantity(raw_data_dict['irradiation_start_s'], 's'),
-        end = Quantity(raw_data_dict['irradiation_end_s'], 's'),
-        metadata_dict = metadata_dict,
-    )
+    # Fitted outside the irradiation window only, where both signals are the phase reading
+    baseline, baseline_with_step, _ = correct_baseline(time, oxygen_signals['phase'], start, end,
+                                                       parameters['baseline_polynomial_order'])
 
-    processed_O2.update({'baseline_umol_L': baseline,
-                         'lbc_fit_umol_L': baseline_with_step,
-                         'data_corrected_umol_L': data_corrected,
-                         'baseline_unit': 'umol/L',
-                         })
+    processed_O2 = {'baseline_umol_L': baseline,
+                    'lbc_fit_umol_L': baseline_with_step,
+                    'baseline_unit': 'umol/L',
+                    'oxygen_from_intensity_umol_L': oxygen_from_intensity,
+                    'intensity_model_parameters': intensity_parameters,
+                    'intensity_drift': intensity_drift,
+                    }
+
+    for signal_name, oxygen in oxygen_signals.items():
+        data_corrected = oxygen - baseline
+        data_quantity = convert_umol_L_to_mol(data_corrected,
+                                              liquid_phase_volume_ml = parameters['liquid_phase_volume_ml'])
+
+        processed_O2[signal_name] = processing_data(time = Quantity(time, 's'),
+                                                    data = data_quantity,
+                                                    start = Quantity(start, 's'),
+                                                    end = Quantity(end, 's'),
+                                                    metadata_dict = metadata_dict)
+        processed_O2[signal_name]['data_corrected_umol_L'] = data_corrected
 
     return processed_O2
 
 def test_function():
 
     import tempfile
-    import numpy as np
     import pandas as pd
 
-    # Synthetic robot log: O2 rises at a known rate for 120 s of a 600 s irradiation
-    oxygen_rate_umol_L_s = 0.5
+    from pykes_robot_app.data_parsing.oxygen_from_intensity import evaluate_intensity_model
+
+    # Synthetic robot log: O2 levels off during a 600 s irradiation, which heats
+    # the sample by 6 K and scatters the phase-based O2 like pulsed light
+    oxygen_plateau_umol_L = 60.
+    rise_time_s = 40.
     time_step = 3.5
     noise_umol_L = 0.012 # white noise of the clean robot runs
+    intensity_model = [165., 0.98, 0.034, -0.02]
     phases = [('DEGASSING', 'FIRESTING-START', 300), ('PREREACTION-BASELINE', 'FIRESTING-START', 900),
               ('REACTION', 'LAMP-ON', 600), ('POSTREACTION-BASELINE', 'LAMP-OFF', 300)]
 
@@ -94,10 +114,20 @@ def test_function():
         phase_start += phase_duration
 
     log = pd.DataFrame(rows)
+    rng = np.random.default_rng(0)
     time_since_irradiation = log['duration'] - 1200
-    log['uM_1'] = (5 - 1e-4 * log['duration']
-                   + oxygen_rate_umol_L_s * np.clip(time_since_irradiation, 0, 120)
-                   + np.random.default_rng(0).normal(0, noise_umol_L, len(log)))
+    irradiated = log['status'] == 'REACTION'
+
+    oxygen = (5 - 1e-4 * log['duration'] + 250 * np.exp(-log['duration'] / 60)
+              + oxygen_plateau_umol_L * (1 - np.exp(-np.clip(time_since_irradiation, 0, None) / rise_time_s)))
+    temperature = 24 + 2 * np.exp(-log['duration'] / 300) + 6 * np.clip(time_since_irradiation / 600, 0, 1)
+
+    log['uM_1'] = np.where(irradiated,
+                           oxygen * np.exp(rng.normal(0, 0.5, len(log))),
+                           oxygen + rng.normal(0, noise_umol_L, len(log)))
+    log['signal_intensity_1'] = (evaluate_intensity_model(np.vstack([oxygen, temperature - 24]), *intensity_model)
+                                 * (1 + np.where(irradiated, 0.02, 0.001) * rng.standard_normal(len(log))))
+    log['optical_temperature_2'] = temperature
 
     metadata_dict = {'experiment_name': 'SYNTHETIC-1', FILE_NAME_COLUMN: 'SYNTHETIC-1.csv'}
 
@@ -108,10 +138,12 @@ def test_function():
     processed = processing_function_O2_liquid(raw_data_dict, metadata_dict)
 
     liquid_volume_L = PROCESSING_PARAMETERS['processing_parameters']['liquid_phase_volume_ml'] * 1e-3
-    print(f"True rate: {oxygen_rate_umol_L_s * liquid_volume_L:.5f} umol/s, "
-          f"extracted: {processed['max_rate_umol_s']:.5f} umol/s")
-    print(f"True max O2: {oxygen_rate_umol_L_s * 120 * liquid_volume_L:.4f} umol, "
-          f"extracted: {processed['max_oxygen_umol']:.4f} umol")
+    window = processed['intensity']['max_rate_window_s']
+    true_rate = oxygen_plateau_umol_L * (1 - np.exp(-window / rise_time_s)) / window * liquid_volume_L
+    print(f"True rate: {true_rate:.5f} umol/s, max O2: {oxygen_plateau_umol_L * liquid_volume_L:.4f} umol")
+    for signal_name in ['intensity', 'phase']:
+        print(f"From {signal_name}: rate {processed[signal_name]['max_rate_umol_s']:.5f} umol/s, "
+              f"max O2 {processed[signal_name]['max_oxygen_umol']:.4f} umol")
 
 if __name__ == "__main__":
     test_function()

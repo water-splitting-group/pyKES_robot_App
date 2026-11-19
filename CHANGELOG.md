@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- O2 from the luminescence intensity of the FireSting sensor, whose phase reading pulsed light disturbs: two-site Stern–Volmer calibration per run on the degassing and pre-reaction measurements, drift from lamp heating corrected to the post-reaction baseline. Method and validation in [docs/pulsed_irradiation.md](docs/pulsed_irradiation.md).
+- Every experiment is processed twice, with intensity-based O2 during irradiation (`processed_data/intensity/...`) and with the phase reading (`processed_data/phase/...`); results table, Analysis Results and Time Series show both, plus the intensity drift and "O2 from intensity". Paths of max rate, max O2 and the time series moved accordingly.
+- The reader also returns the intensity and the degassing measurements; robot logs need the columns `signal_intensity_1` and `optical_temperature_2`. Datasets saved before have to be re-uploaded from the raw files.
+
 - Upload handler for photocat-hte robot logs, named in the overview column `File name O2`: logistic baseline correction ported from hte_streamlit, max rate with pyKES `extract_max_rate`.
 - Max rate and max O2 from two `extract_max_rate` passes, for short O2 bursts and for the scattered traces of pulsed irradiation alike:
   - pass 1 smooths the whole irradiation window and gives max O2 (maximum of the smoothed curve);
